@@ -248,3 +248,74 @@ class RobotInterface:
             "Cannot find SO-101 URDF. Download it from https://huggingface.co/lerobot/so-arm100 "
             "or pass --urdf_path to the script."
         )
+        # ================= 以下为你新增的逆运动学与控制功能 =================
+
+    def set_joint_positions(self, target_angles_deg: dict[str, float]) -> None:
+        """底层写入接口：将角度指令发送给飞特舵机"""
+        if not self._connected:
+            logger.warning("❌ 机械臂未连接，无法发送指令！")
+            return
+        
+        # 遍历目标角度字典，写入 Goal_Position 寄存器
+        for name, angle in target_angles_deg.items():
+            if name in self.motor_names:
+                self._bus.write("Goal_Position", name, float(angle))
+
+    def move_to_xyz(self, x_mm: float, y_mm: float, z_mm: float) -> bool:
+        """
+        核心大脑 (IK)：使用 Scipy 优化器，自动推算 XYZ 对应的电机角度，并执行移动。
+        同时加入了“强制夹爪朝下”的桌面抓取约束。
+        """
+        import numpy as np
+        from scipy.optimize import minimize
+
+        if not self._connected:
+            print("❌ 请先连接机械臂！")
+            return False
+
+        if self._kinematics is None:
+            self._init_kinematics()
+
+        # 1. 将输入的毫米转换为底层数学所需的米
+        target_p = np.array([x_mm, y_mm, z_mm]) / 1000.0
+
+        # 2. 读取当前各个关节的角度，作为求解的“起始点”
+        current_dict = self.get_joint_positions()
+        # SO100 控制位置的是前 5 个电机（去掉最后一个 gripper）
+        initial_guess = [current_dict[name] for name in self.motor_names[:-1]]
+
+        # 3. 定义打靶目标 (代价函数)
+        def objective(angles):
+            # 用自带的正运动学算一下，如果转到这个角度，夹爪会在哪？
+            T = self._kinematics.forward_kinematics(angles)
+            current_p = T[:3, 3]
+            
+            # 抓取约束：提取当前姿态的 Z 轴方向，我们希望夹爪始终垂直向下 [0, 0, -1]
+            z_axis = T[:3, 2]
+            target_z_axis = np.array([0.0, 0.0, -1.0])
+            
+            # 误差 = 位置距离误差 + (姿态惩罚权重 * 姿态偏差)
+            pos_error = np.linalg.norm(current_p - target_p)
+            ori_error = np.linalg.norm(z_axis - target_z_axis)
+            return pos_error + (ori_error * 0.1)
+
+        print(f"🧠 IK 逆向解算中... 目标: X={x_mm:.1f}, Y={y_mm:.1f}, Z={z_mm:.1f}")
+        
+        # 4. 运行优化器求解 (限制每个电机的物理活动范围在 -150° 到 150° 之间)
+        bounds = [(-150, 150)] * len(self.motor_names[:-1])
+        res = minimize(objective, initial_guess, method='L-BFGS-B', bounds=bounds)
+
+        # 判断误差是否收敛 (如果算出来的点离目标依然大于 2 厘米，说明物理够不到)
+        if res.fun > 0.02:
+            print(f"❌ 目标坐标超出机械臂可达范围 (死角或过远)！残差: {res.fun*1000:.1f}mm")
+            return False
+
+        print("🦾 坐标解算成功！正在下发驱动指令...")
+        
+        # 5. 打包求解出来的角度，下发给底层电机
+        target_angles = {}
+        for i, name in enumerate(self.motor_names[:-1]):
+            target_angles[name] = float(res.x[i])
+            
+        self.set_joint_positions(target_angles)
+        return True
