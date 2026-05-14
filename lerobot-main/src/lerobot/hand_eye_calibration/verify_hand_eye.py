@@ -187,12 +187,19 @@ def main():
                 print(f"🛡️ 启用绝对安全高度: Z={safe_z:.1f} mm (物理桌面+40mm)")
                 
                 
-              
+                # 触发移动！
+                if hasattr(robot, 'move_to_xyz'):
+                    robot._bus.enable_torque()
+                    success = robot.move_to_xyz(target_x, target_y, safe_z)
+                    if success:
+                        print(f"✅ 机械臂已精准悬停在角点 {tid} 正上方 40mm 处！")
+                else:
+                    print("❌ 警告：在 robot_interface.py 中未检测到 move_to_xyz 接口，无法移动！")
                 
                 target_id_str = "" # 清空备用
 
         else:
-            # === 常规状态指令 ===
+            # === 常规游离状态指令 ===
             if key == ord('g'):
                 input_mode = True
                 target_id_str = ""
@@ -242,6 +249,49 @@ def main():
                 recorded_points.clear()
                 recorded_errors.clear()
                 print("🔄 数据已重置。")
+            elif key == ord('h') or key == ord('H'):
+                print("🏠 收到回零指令！正在平滑返回初始待机位...")
+                
+                # 刚才通过示教获取的绝对安全姿态
+                HOME_ANGLES = {
+                    'shoulder_pan': -10.725, 
+                    'shoulder_lift': -98.197, 
+                    'elbow_flex': 30.197, 
+                    'wrist_flex': 107.340, 
+                    'wrist_roll': -7.252, 
+                    'gripper': -62.945
+                }
+                
+                # 1. 唤醒电机发力
+                robot._bus.enable_torque()
+                
+                # 2. 软件平滑插值 (把路程切成 40 份，耗时约 1.6 秒)
+                import time
+                steps = 40
+                step_delay = 0.04
+                start_angles = robot.get_joint_positions()
+                
+                for step in range(1, steps + 1):
+                    intermediate_angles = {}
+                    for name in HOME_ANGLES.keys():
+                        start_angle = start_angles[name]
+                        end_angle = HOME_ANGLES[name]
+                        # 线性插值算中间角度
+                        current_angle = start_angle + (end_angle - start_angle) * (step / steps)
+                        intermediate_angles[name] = current_angle
+                        
+                    # 下发这一小碎步的指令
+                    robot.set_joint_positions(intermediate_angles)
+                    time.sleep(step_delay)
+                    
+                print("✅ 已安全回到初始位置！")
+                
+            elif key == ord('d'):
+                robot.disable_torque()
+                print("💤 扭矩已解除！机械臂现在是柔软状态，可以手动挪开了。")
+            elif key == ord('d'):
+                robot.disable_torque()
+                print("💤 扭矩已解除！机械臂现在是柔软状态，可以手动挪开了。")
             elif key == ord('q'):
                 break
 
